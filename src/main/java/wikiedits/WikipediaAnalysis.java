@@ -73,7 +73,8 @@ public class WikipediaAnalysis {
                         logger.info("---in fold function ----" + event.getUser());
                         return acc;
                     }
-                }).map(new MapFunction<Tuple2<String,Long>, String>() {
+                })
+                .map(new MapFunction<Tuple2<String,Long>, String>() {
                     @Override
                     public String map(Tuple2<String, Long> tuple) {
                         logger.info("result--string"+tuple.toString());
@@ -112,7 +113,7 @@ public class WikipediaAnalysis {
 
         @Override
         public long extractTimestamp(WikipediaEditEvent tuple,long previousElementTimestamp){
-            long timestamp = System.currentTimeMillis() / 1000L;
+            long timestamp = System.currentTimeMillis();
 
 //            System.out.println(timestamp);
             currentMaxTimestamp = Math.max(timestamp, currentMaxTimestamp);
@@ -125,7 +126,7 @@ public class WikipediaAnalysis {
 
 
 //            System.out.println(System.currentTimeMillis());
-            Watermark current = new Watermark(System.currentTimeMillis()/1000L - maxOutOfOrderness);
+            Watermark current = new Watermark(System.currentTimeMillis() - maxOutOfOrderness);
             logger.info("---in watermark ----" + current.getTimestamp());
             return current;
 //            return new Watermark(System.currentTimeMillis()/1000L - maxOutOfOrderness);
