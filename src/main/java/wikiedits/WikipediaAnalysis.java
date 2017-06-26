@@ -83,6 +83,7 @@ public class WikipediaAnalysis {
                 });
         logger.info("--  pre result --");
         result.print();
+        result.writeAsText("/Users/ZalaCheung/Documents/wiki_ouput");
 
 //        DataStream<String> printed_result = result
 //                .map(new MapFunction<Tuple2<String,Long>, String>() {
