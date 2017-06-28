@@ -5,9 +5,15 @@ package wikiedits;
 import org.apache.flink.api.common.functions.MapFunction;
 
 import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternSelectFunction;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.runtime.state.filesystem.FsStateBackend;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -31,17 +37,16 @@ import org.apache.flink.table.api.java.Tumble;
 
 import org.apache.flink.table.sinks.CsvTableSink;
 import org.apache.flink.table.sinks.TableSink;
+import org.apache.hadoop.yarn.webapp.hamlet.HamletSpec;
 import org.apache.log4j.Logger;
 import org.apache.sling.commons.json.JSONObject;
 
 
-import java.awt.*;
+import javax.annotation.Nullable;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.Properties;
-import java.util.regex.Pattern;
+import java.util.*;
+//import java.util.regex.Pattern;
 
 /**
  * Created by ZalaCheung on 6/20/17.
@@ -87,6 +92,9 @@ public class ApkAnalysis {
 
 
 
+
+
+
         //map string to tuple and assign Timestamp
         DataStream<Tuple4<Long,String,Integer,Integer>> withTimestamp = stream
                 .map(new mapper())
@@ -100,7 +108,47 @@ public class ApkAnalysis {
         DataStream<Tuple4<Long,String,Integer,Integer>> partitionedStream = withTimestamp
                 .keyBy(1);
 
-//        Pattern<,?> = Pattern.<Tuple4<Long,String,Integer,Integer>>begin("")
+        Pattern<Tuple4<Long,String,Integer,Integer>,?> pattern = Pattern.<Tuple4<Long,String,Integer,Integer>>begin("start")
+                .next("middle")
+                .where(new SimpleCondition<Tuple4<Long,String,Integer,Integer>>() {
+                    @Override
+                    public boolean filter(Tuple4 tuple4) throws Exception {
+//                        return tuple4.f1 != "Illegal_MSG";
+                        return true;
+                    }
+                }).within(Time.seconds(15));
+//                .next("end").where(new SimpleCondition<Tuple4<Long, String, Integer, Integer>>() {
+//                    @Override
+//                    public boolean filter(Tuple4<Long, String, Integer, Integer> longStringIntegerIntegerTuple4) throws Exception {
+//                        return true;
+//                    }
+//                });
+
+        PatternStream<Tuple4<Long,String,Integer,Integer>> patternStream = CEP.pattern(partitionedStream,pattern);
+        DataStream<Tuple4<Long, String, Integer, Integer>>   patternedDataStream = patternStream.select(new PatternSelectFunction<Tuple4<Long,String,Integer,Integer>,Tuple4<Long,String,Integer,Integer>>(){
+            @Override
+            public Tuple4<Long, String, Integer, Integer> select(Map<String, List<Tuple4<Long, String, Integer, Integer>>> map) throws Exception {
+                int len = map.get("start").size();
+                Tuple4<Long, String, Integer, Integer> tuple4 = new Tuple4<>(new Long(0),map.get("start").get(0).f1,0,0);
+                for(int i = 0;i < len;i++){
+                    if (tuple4.f0 == 0)
+                        tuple4.f0 = map.get("start").get(i).f0;
+                    else
+                        tuple4.f0 = (map.get("start").get(i).f0 +tuple4.f0) /2;
+                    tuple4.f2 += map.get("start").get(i).f2;
+                    tuple4.f3 += map.get("start").get(i).f3;
+                }
+                return tuple4;
+            }
+        });
+        patternedDataStream.map(new MapFunction<Tuple4<Long, String, Integer, Integer>, String>() {
+            @Override
+            public String map(Tuple4<Long, String, Integer, Integer> longStringIntegerIntegerTuple4) throws Exception {
+                return longStringIntegerIntegerTuple4.toString();
+            }
+        }).writeAsText("/home/gzzhangdesheng/PatternOutput");
+
+
 
 
         /**
@@ -119,6 +167,14 @@ public class ApkAnalysis {
 
         tableResult.writeToSink(sink);
 
+//        tableEnv.registerDataStream("SQLTable",withTimestamp,"rowtime, Package,success,failure");
+//        Table sqlResult  = tableEnv.sql(
+//          "select AVG(RowTime), Package, SUM(success), SUM(failure) FROM SQLTable "
+//
+//                + " GROUP BY TUMBLE(rowtime, INTERVAL '1' MINUTE), Package"
+//        );
+//        TableSink sqlSink = new CsvTableSink("/home/gzzhangdesheng/SQLSink", "|");
+//        sqlResult.writeToSink(sqlSink);
 
         /**
          * STREAM API METHOD
@@ -168,9 +224,66 @@ public class ApkAnalysis {
 //        result.print();
                 result.addSink(new FlinkKafkaProducer08<>("10.82.45.18:9092", "flink_test", new SimpleStringSchema()));
 //        stream.addSink(new FlinkKafkaProducer08<>("sigma-kafka01-test.i.nease.net:9092", "flink_test", new SimpleStringSchema()));
+
+
+        /**
+         * This is another way to map the String.
+         * Instead of mapping String to Tuple,we map String to POJO type
+         */
+        DataStream<PackageInfo> pojoWithTimestamp = stream
+                .map(new mapToPojo())
+                .assignTimestampsAndWatermarks(new TimeStampsAndWatermarksForPojoElement());
+
+
+        DataStream<PackageInfo> reducedPojo = pojoWithTimestamp
+                .keyBy(new KeySelector<PackageInfo, Object>() {
+                    @Override
+                    public Object getKey(PackageInfo packageInfo) throws Exception {
+                        return packageInfo.getPackageVersion();
+                    }
+                })
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .reduce(new ReduceFunction<PackageInfo>() {
+                    @Override
+                    public PackageInfo reduce(PackageInfo t2, PackageInfo t1) throws Exception {
+                        long timestamp = (t2.getTimeStamp() + t1.getTimeStamp()) /2;
+                        int success = t1.getSuccess() + t2.getSuccess();
+                        int fail = t1.getFailure() + t2.getFailure();
+                        return new PackageInfo(timestamp,t1.getPackageVersion(),success,fail);
+                    }
+                });
+
+        reducedPojo.map(new MapFunction<PackageInfo, Object>() {
+            @Override
+            public String map(PackageInfo packageInfo) throws Exception {
+                try {
+                    String output = new JSONObject()
+                            .put("time", packageInfo.getTimeStamp())
+                            .put("package",packageInfo.getPackageVersion())
+                            .put("success",packageInfo.getSuccess())
+                            .put("failure",packageInfo.getFailure())
+                            .toString();
+                    return output;
+                }catch (Exception e){
+                    logger.info("JsonError");
+                    return "error";
+                }
+            }
+        }).writeAsText("/home/gzzhangdesheng/PojoOutput");
+
+
+
+
+
+
+
+
         see.execute();
         tableEnv.execEnv();
     }
+
+
+
 
     public static  class  MyTimestampsAndWatermarks implements AssignerWithPeriodicWatermarks<Tuple4<Long, String, Integer, Integer>> {
 //        private static final Logger logger = Logger.getLogger(MyTimestampsAndWatermarks.class);
@@ -192,6 +305,27 @@ public class ApkAnalysis {
             Watermark newWatermark = new Watermark(currentMaxTimestamp-maxOutOfOrderness);
             logger.info("---  emmit watermark with timestamp" +newWatermark.getTimestamp());
             return newWatermark;
+        }
+    }
+
+    public static class TimeStampsAndWatermarksForPojoElement implements AssignerWithPeriodicWatermarks<PackageInfo>{
+
+        private final long maxOutOfOrderness = 3500;
+        private long currentMaxTimestamp;
+        @Nullable
+        @Override
+        public Watermark getCurrentWatermark() {
+            Watermark newWatermark = new Watermark(currentMaxTimestamp-maxOutOfOrderness);
+            logger.info("---  emmit watermark with POJO timestamp" +newWatermark.getTimestamp());
+            return newWatermark;
+        }
+
+        @Override
+        public long extractTimestamp(PackageInfo element, long previousElementTimestamp) {
+            long timestamp =element.getTimeStamp();
+            currentMaxTimestamp = Math.max(timestamp, currentMaxTimestamp);
+            return timestamp;
+
         }
     }
 
@@ -221,6 +355,34 @@ public class ApkAnalysis {
             }
         }
     }
+
+
+    public static class mapToPojo implements MapFunction<String,PackageInfo>{
+
+        @Override
+        public PackageInfo map(String s) throws Exception {
+            String[] splited = s.split("\"");
+            if(splited.length < 4){
+                return new PackageInfo(System.currentTimeMillis(),"Illegal_MSG",0,0);
+            }
+            String TimeStamp = splited[0].trim().split("\\[")[1];
+            int timeStringLength = TimeStamp.length();
+            TimeStamp = TimeStamp.substring(0,timeStringLength - 1);
+//            Long unixTimeStamp = timeTransfer(TimeStamp);
+            Long unixTimeStamp = System.currentTimeMillis();
+            String Apk = splited[1].trim().split(" ")[1];
+            int len = Apk.split("/").length;
+            String Apk_version = Apk.split("/")[len - 1];
+            Integer Status = Integer.parseInt(splited[2].trim().split(" ")[0]);
+
+            if(Status == 200){
+                return new PackageInfo(unixTimeStamp,Apk_version,1,0);
+            }else {
+                return new PackageInfo(unixTimeStamp, Apk_version,0,1);
+            }
+        }
+    }
+
 
     public static Long timeTransfer(String dateString) throws Exception{
         DateFormat dateFormat = new SimpleDateFormat("dd/MMM/yyyy:hh:mm:ss z", Locale.ENGLISH);
