@@ -91,64 +91,10 @@ public class ApkAnalysis {
         see.setStateBackend(new FsStateBackend("file:///home/gzzhangdesheng/checkpoint"));
 
 
-
-
-
-
         //map string to tuple and assign Timestamp
         DataStream<Tuple4<Long,String,Integer,Integer>> withTimestamp = stream
                 .map(new mapper())
                 .assignTimestampsAndWatermarks(new MyTimestampsAndWatermarks());
-
-
-        /**
-         *
-         * For CEP
-         */
-        DataStream<Tuple4<Long,String,Integer,Integer>> partitionedStream = withTimestamp
-                .keyBy(1);
-
-        Pattern<Tuple4<Long,String,Integer,Integer>,?> pattern = Pattern.<Tuple4<Long,String,Integer,Integer>>begin("start")
-                .next("middle")
-                .where(new SimpleCondition<Tuple4<Long,String,Integer,Integer>>() {
-                    @Override
-                    public boolean filter(Tuple4 tuple4) throws Exception {
-//                        return tuple4.f1 != "Illegal_MSG";
-                        return true;
-                    }
-                }).within(Time.seconds(15));
-//                .next("end").where(new SimpleCondition<Tuple4<Long, String, Integer, Integer>>() {
-//                    @Override
-//                    public boolean filter(Tuple4<Long, String, Integer, Integer> longStringIntegerIntegerTuple4) throws Exception {
-//                        return true;
-//                    }
-//                });
-
-        PatternStream<Tuple4<Long,String,Integer,Integer>> patternStream = CEP.pattern(partitionedStream,pattern);
-        DataStream<Tuple4<Long, String, Integer, Integer>>   patternedDataStream = patternStream.select(new PatternSelectFunction<Tuple4<Long,String,Integer,Integer>,Tuple4<Long,String,Integer,Integer>>(){
-            @Override
-            public Tuple4<Long, String, Integer, Integer> select(Map<String, List<Tuple4<Long, String, Integer, Integer>>> map) throws Exception {
-                int len = map.get("start").size();
-                Tuple4<Long, String, Integer, Integer> tuple4 = new Tuple4<>(new Long(0),map.get("start").get(0).f1,0,0);
-                for(int i = 0;i < len;i++){
-                    if (tuple4.f0 == 0)
-                        tuple4.f0 = map.get("start").get(i).f0;
-                    else
-                        tuple4.f0 = (map.get("start").get(i).f0 +tuple4.f0) /2;
-                    tuple4.f2 += map.get("start").get(i).f2;
-                    tuple4.f3 += map.get("start").get(i).f3;
-                }
-                return tuple4;
-            }
-        });
-        patternedDataStream.map(new MapFunction<Tuple4<Long, String, Integer, Integer>, String>() {
-            @Override
-            public String map(Tuple4<Long, String, Integer, Integer> longStringIntegerIntegerTuple4) throws Exception {
-                return longStringIntegerIntegerTuple4.toString();
-            }
-        }).writeAsText("/home/gzzhangdesheng/PatternOutput");
-
-
 
 
         /**
@@ -165,7 +111,7 @@ public class ApkAnalysis {
                 .select("success.sum,failure.sum");
         TableSink sink = new CsvTableSink("/home/gzzhangdesheng/CvsSink", "|");
 
-        tableResult.writeToSink(sink);
+//        tableResult.writeToSink(sink);
 
 //        tableEnv.registerDataStream("SQLTable",withTimestamp,"rowtime, Package,success,failure");
 //        Table sqlResult  = tableEnv.sql(
@@ -272,9 +218,63 @@ public class ApkAnalysis {
         }).writeAsText("/home/gzzhangdesheng/PojoOutput");
 
 
+        /**
+         * Flink CEP DEMO
+         * Detect the failure rate
+         * If there are two consecutive Aggregations that failure rates over 0.5
+         * Raise an alarm
+         */
+        final Pattern<PackageInfo,?> FailureAlarm = Pattern.<PackageInfo>begin("first")
+                .where(new SimpleCondition<PackageInfo>() {
+                    @Override
+                    public boolean filter(PackageInfo packageInfo) throws Exception {
+                        return packageInfo.getSuccess() <= packageInfo.getSuccess();
+                    }
+                })
+                .next("second")
+                .where(new SimpleCondition<PackageInfo>() {
+                    @Override
+                    public boolean filter(PackageInfo packageInfo) throws Exception {
+                        return packageInfo.getSuccess() <= packageInfo.getSuccess();
+                    }
+                });
 
+        PatternStream<PackageInfo> alarmPatternStream = CEP.pattern(reducedPojo.keyBy(new KeySelector<PackageInfo, Object>() {
+            @Override
+            public Object getKey(PackageInfo packageInfo) throws Exception {
+                return packageInfo.getPackageVersion();
+            }
+        }),FailureAlarm);
 
+        DataStream<FailureRateAlarm> alarmDataStream = alarmPatternStream.select(new PatternSelectFunction<PackageInfo, FailureRateAlarm>() {
+            @Override
+            public FailureRateAlarm select(Map<String, List<PackageInfo>> map) throws Exception {
+                PackageInfo first = map.get("first").get(0);
+                PackageInfo second = map.get("second").get(0);
+                int totalSucess = first.getSuccess() + second.getSuccess();
+                int totalDownload = totalSucess + first.getFailure() + second.getFailure();
+                float averageFailureRate = (first.getFailure() + second.getFailure()) / totalDownload;
+                logger.info("--Failure Rate--  "+ averageFailureRate);
+                return new FailureRateAlarm(first.getTimeStamp(),first.getPackageVersion(),averageFailureRate);
+            }
+        });
 
+        alarmDataStream.map(new MapFunction<FailureRateAlarm, Object>() {
+            @Override
+            public String map(FailureRateAlarm failureRateAlarm) throws Exception {
+                try {
+                    String output = new JSONObject()
+                            .put("time", failureRateAlarm.getTimestamp())
+                            .put("package",failureRateAlarm.getPackageVersion())
+                            .put("failureRate",failureRateAlarm.getFailureRate())
+                            .toString();
+                    return output;
+                }catch (Exception e){
+                    logger.info("JsonError");
+                    return "error_Pattern_Info";
+                }
+            }
+        }).writeAsText("/home/gzzhangdesheng/PatternOut");
 
 
 
