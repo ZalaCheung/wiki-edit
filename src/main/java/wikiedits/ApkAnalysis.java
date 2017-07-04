@@ -37,7 +37,6 @@ import org.apache.flink.table.api.java.Tumble;
 
 import org.apache.flink.table.sinks.CsvTableSink;
 import org.apache.flink.table.sinks.TableSink;
-import org.apache.hadoop.yarn.webapp.hamlet.HamletSpec;
 import org.apache.log4j.Logger;
 import org.apache.sling.commons.json.JSONObject;
 
@@ -109,7 +108,7 @@ public class ApkAnalysis {
         WindowedTable windowedTable =table.window(Tumble.over("10.seconds").on("UserActionTime").as("UserActionWindow"));
         Table tableResult = windowedTable.groupBy("Package,UserActionWindow")
                 .select("success.sum,failure.sum");
-        TableSink sink = new CsvTableSink("/home/gzzhangdesheng/CvsSink", "|");
+        TableSink sink = new CsvTableSink("/home/gzzhangdesheng/flinkOutput/CvsSink", "|");
 
 //        tableResult.writeToSink(sink);
 
@@ -166,7 +165,7 @@ public class ApkAnalysis {
             }
         });
 
-        result.writeAsText("/home/gzzhangdesheng/outputFile");
+        result.writeAsText("/home/gzzhangdesheng/flinkOutput/outputFile");
 //        result.print();
                 result.addSink(new FlinkKafkaProducer08<>("10.82.45.18:9092", "flink_test", new SimpleStringSchema()));
 //        stream.addSink(new FlinkKafkaProducer08<>("sigma-kafka01-test.i.nease.net:9092", "flink_test", new SimpleStringSchema()));
@@ -215,7 +214,7 @@ public class ApkAnalysis {
                     return "error";
                 }
             }
-        }).writeAsText("/home/gzzhangdesheng/PojoOutput");
+        }).writeAsText("/home/gzzhangdesheng/flinkOutput/PojoOutput");
 
 
         /**
@@ -228,16 +227,9 @@ public class ApkAnalysis {
                 .where(new SimpleCondition<PackageInfo>() {
                     @Override
                     public boolean filter(PackageInfo packageInfo) throws Exception {
-                        return packageInfo.getSuccess() <= packageInfo.getSuccess();
+                        return packageInfo.getSuccess() < packageInfo.getFailure();
                     }
-                })
-                .next("second")
-                .where(new SimpleCondition<PackageInfo>() {
-                    @Override
-                    public boolean filter(PackageInfo packageInfo) throws Exception {
-                        return packageInfo.getSuccess() <= packageInfo.getSuccess();
-                    }
-                });
+                }).times(2);
 
         PatternStream<PackageInfo> alarmPatternStream = CEP.pattern(reducedPojo.keyBy(new KeySelector<PackageInfo, Object>() {
             @Override
@@ -249,11 +241,15 @@ public class ApkAnalysis {
         DataStream<FailureRateAlarm> alarmDataStream = alarmPatternStream.select(new PatternSelectFunction<PackageInfo, FailureRateAlarm>() {
             @Override
             public FailureRateAlarm select(Map<String, List<PackageInfo>> map) throws Exception {
+                float averageFailureRate;
                 PackageInfo first = map.get("first").get(0);
-                PackageInfo second = map.get("second").get(0);
+                PackageInfo second = map.get("first").get(1);
                 int totalSucess = first.getSuccess() + second.getSuccess();
                 int totalDownload = totalSucess + first.getFailure() + second.getFailure();
-                float averageFailureRate = (first.getFailure() + second.getFailure()) / totalDownload;
+                if(totalDownload == 0)
+                    averageFailureRate = 0;
+                else
+                    averageFailureRate = (first.getFailure() + second.getFailure()) / totalDownload;
                 logger.info("--Failure Rate--  "+ averageFailureRate);
                 return new FailureRateAlarm(first.getTimeStamp(),first.getPackageVersion(),averageFailureRate);
             }
@@ -274,7 +270,7 @@ public class ApkAnalysis {
                     return "error_Pattern_Info";
                 }
             }
-        }).writeAsText("/home/gzzhangdesheng/PatternOut");
+        }).writeAsText("/home/gzzhangdesheng/flinkOutput/PatternOut");
 
 
 
